@@ -1,4 +1,5 @@
-# this fork aims at adding extra synthetic tag detections around a true detection
+# corrupted apriltag_ros
+this fork aims at adding extra synthetic tag detections around a true detection
 
 
 # apriltag_ros
