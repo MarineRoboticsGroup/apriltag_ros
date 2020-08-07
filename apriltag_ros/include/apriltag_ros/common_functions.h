@@ -67,6 +67,9 @@
 #include "apriltag_ros/AprilTagDetection.h"
 #include "apriltag_ros/AprilTagDetectionArray.h"
 
+//for sampling corrupted tag detections
+#include <random>
+
 namespace apriltag_ros
 {
 
@@ -172,16 +175,19 @@ class TagDetector
   // AprilTag 2 objects
   apriltag_family_t *tf_;
   apriltag_detector_t *td_;
-  zarray_t *detections_;
 
   // Other members
-  std::map<int, StandaloneTagDescription> standalone_tag_descriptions_;
-  std::vector<TagBundleDescription > tag_bundle_descriptions_;
   bool remove_duplicates_;
   bool run_quietly_;
+
+ protected:
+  zarray_t *detections_;
+  std::map<int, StandaloneTagDescription> standalone_tag_descriptions_;
+  std::vector<TagBundleDescription > tag_bundle_descriptions_;
   bool publish_tf_;
   tf::TransformBroadcaster tf_pub_;
   std::string camera_tf_frame_;
+
 
  public:
 
@@ -232,6 +238,30 @@ class TagDetector
 
   // Draw the detected tags' outlines and payload values on the image
   void drawDetections(cv_bridge::CvImagePtr image);
+};
+
+class CorruptedTagDetector : public TagDetector
+{
+private:
+  //the first element is the sampling probability to add such an extra pose
+  std::vector<std::pair<double, Eigen::Matrix4d>> prob_pose_vector_;
+  zarray_t *corrupted_detections_;
+  // random generator
+  std::default_random_engine generator_;
+
+public:
+  CorruptedTagDetector(ros::NodeHandle pnh);
+  ~CorruptedTagDetector();
+  std::vector<std::pair<double, Eigen::Matrix4d>> parseRandomPoses(
+      XmlRpc::XmlRpcValue& random_pose_descriptions);
+
+  AprilTagDetectionArray detectCorruptedTags(
+      const cv_bridge::CvImagePtr& image,
+      const sensor_msgs::CameraInfoConstPtr& camera_info);
+  void drawCorruptedDetections(cv_bridge::CvImagePtr image);
+  Eigen::Matrix4d RosPose2EigenMatrix(geometry_msgs::Pose& pose);
+  geometry_msgs::Pose EigenMatrix2RosPose(Eigen::Matrix4d& matrix);
+  void printDetPoints(apriltag_detection_t *det);
 };
 
 } // namespace apriltag_ros

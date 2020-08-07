@@ -45,6 +45,352 @@
 namespace apriltag_ros
 {
 
+CorruptedTagDetector::CorruptedTagDetector(ros::NodeHandle pnh) : TagDetector(pnh) {
+  // Parse random_poses_generator.yaml
+  XmlRpc::XmlRpcValue random_pose_descriptions;
+  if(!pnh.getParam("random_poses", random_pose_descriptions))
+  {
+    ROS_WARN("No random poses specified");
+    ROS_INFO_STREAM("Random pose yaml is not loaded.");
+  }
+  else
+  {
+    ROS_INFO_STREAM("Random pose yaml is loaded.");
+    try
+    {
+      prob_pose_vector_ =
+          parseRandomPoses(random_pose_descriptions);
+    }
+    catch(XmlRpc::XmlRpcException e)
+    {
+      // in case any of the asserts in parseStandaloneTags() fail
+      ROS_ERROR_STREAM("Error loading random poses descriptions: " <<
+                       e.getMessage().c_str());
+    }
+  }    
+  corrupted_detections_ = NULL;
+  generator_.seed(1);
+}
+
+// destructor
+CorruptedTagDetector::~CorruptedTagDetector() {
+  // Free memory associated with the array of corrupted tag detections
+  apriltag_detections_destroy(corrupted_detections_);
+}
+
+Eigen::Matrix4d CorruptedTagDetector::RosPose2EigenMatrix(geometry_msgs::Pose& pose){
+  Eigen::Matrix4d matrix = Eigen::Matrix4d::Zero();
+  geometry_msgs::Point p = pose.position;
+  geometry_msgs::Quaternion q = pose.orientation;
+  Eigen::Quaternion<double> quat(q.w, q.x, q.y, q.z);
+  Eigen::Matrix3d rot = quat.normalized().toRotationMatrix();
+  matrix.block(0,0,3,3) = rot;
+  matrix(0, 3) = p.x;
+  matrix(1, 3) = p.y;
+  matrix(2, 3) = p.z;
+  matrix(3, 3) = 1.0;
+  return matrix;
+}
+
+geometry_msgs::Pose CorruptedTagDetector::EigenMatrix2RosPose(Eigen::Matrix4d& matrix){
+  geometry_msgs::Pose pose;
+  pose.position.x = matrix(0, 3);
+  pose.position.y = matrix(1, 3);
+  pose.position.z = matrix(2, 3);
+  Eigen::Matrix3d rot = matrix.block(0,0,3,3);
+  Eigen::Quaternion<double> quat(rot);
+  pose.orientation.x = quat.x();
+  pose.orientation.y = quat.y();
+  pose.orientation.z = quat.z();
+  pose.orientation.w = quat.w();
+  return pose;
+}
+
+void CorruptedTagDetector::printDetPoints(apriltag_detection_t *det){
+  std::cout<<"center of the detection on image: "<<
+          "("<<det->c[0]<<" ,"<<det->c[1]<<")"<<std::endl;
+  std::cout<<"corners of the detection on image: "<<          
+          "("<<det->p[0][0]<<" ,"<<det->p[0][1]<<")"<<" ,"<<
+          "("<<det->p[1][0]<<" ,"<<det->p[1][1]<<")"<<" ,"<<
+          "("<<det->p[2][0]<<" ,"<<det->p[2][1]<<")"<<" ,"<<
+          "("<<det->p[3][0]<<" ,"<<det->p[3][1]<<")"<<std::endl;
+}
+
+AprilTagDetectionArray CorruptedTagDetector::detectCorruptedTags(
+      const cv_bridge::CvImagePtr& image,
+      const sensor_msgs::CameraInfoConstPtr& camera_info){
+  //retrieve camera focal length
+  image_geometry::PinholeCameraModel camera_model;
+  camera_model.fromCameraInfo(camera_info);
+
+  // Get camera intrinsic properties for rectified image.
+  double fx = camera_model.fx(); // focal length in camera x-direction [px]
+  double fy = camera_model.fy(); // focal length in camera y-direction [px]
+  double cx = camera_model.cx(); // optical center x-coordinate [px]
+  double cy = camera_model.cy(); // optical center y-coordinate [px]
+
+  //distribution for sampling fake poses
+  std::uniform_real_distribution<double> distribution(0.0, 1.0);
+
+  AprilTagDetectionArray rawTagDetArray, corruptedDetArray;
+  //do normal detectino first
+  rawTagDetArray = detectTags(image, camera_info);
+  //create corrupted one
+  corruptedDetArray.header = rawTagDetArray.header;
+  //create corrupted apritltag lib detection results
+  //this will be used by drawTag method
+  corrupted_detections_ = zarray_copy(detections_);
+
+  //std::cout<<"number of raw detections: "<<rawTagDetArray.detections.size()<<std::endl;
+  for (int32_t i = 0; i < rawTagDetArray.detections.size(); i++){
+    //deep copy raw detection first
+    AprilTagDetection raw_detection;
+    raw_detection.pose = rawTagDetArray.detections[i].pose;
+    for (int32_t j = 0; j < rawTagDetArray.detections[i].id.size(); j++){
+      raw_detection.id.push_back(rawTagDetArray.detections[i].id[j]);
+      raw_detection.size.push_back(rawTagDetArray.detections[i].size[j]);
+    }
+    corruptedDetArray.detections.push_back(raw_detection);
+
+    //raw detection from apriltag lib
+    //https://github.com/AprilRobotics/apriltag/blob/master/common/zarray.h
+    apriltag_detection_t *detection;
+    zarray_get(detections_, i, &detection);
+    //printDetPoints(detection);
+
+    //add fake poses with probabilities
+    for (int32_t pose_id = 0; pose_id < prob_pose_vector_.size(); pose_id++){
+      double r = distribution(generator_);
+      if (r < prob_pose_vector_[pose_id].first){
+        //compute fake tag transform matrix
+        //std::cout<<"adding fake msg of pose "<<pose_id<<std::endl;
+        Eigen::Matrix4d rawTagTransform = RosPose2EigenMatrix(rawTagDetArray.detections[i].pose.pose.pose);
+        Eigen::Matrix4d fakeTagTransform = rawTagTransform * prob_pose_vector_[pose_id].second;
+        //convert to ros message
+        AprilTagDetection fake_detection;
+        fake_detection.pose.header = rawTagDetArray.detections[i].pose.header;
+        fake_detection.pose.pose.pose = EigenMatrix2RosPose(fakeTagTransform);
+        for (int32_t j = 0; j < rawTagDetArray.detections[i].id.size(); j++){
+          fake_detection.id.push_back(rawTagDetArray.detections[i].id[j]);
+          fake_detection.size.push_back(rawTagDetArray.detections[i].size[j]);
+        }
+        corruptedDetArray.detections.push_back(fake_detection);
+
+        if (publish_tf_) {
+          StandaloneTagDescription* standaloneDescription;
+          findStandaloneTagDescription(rawTagDetArray.detections[i].id[0], standaloneDescription,
+                                            false);
+          geometry_msgs::PoseStamped pose;
+          pose.pose = fake_detection.pose.pose.pose;
+          pose.header = fake_detection.pose.header;
+          tf::Stamped<tf::Transform> tag_transform;
+          tf::poseStampedMsgToTF(pose, tag_transform);
+          std::string fake_tag_frame_name = standaloneDescription->frame_name()+"_"+std::to_string(pose_id);
+          tf_pub_.sendTransform(tf::StampedTransform(tag_transform,
+                                                     tag_transform.stamp_,
+                                                     camera_tf_frame_,
+                                                     fake_tag_frame_name));
+        }
+
+        //std::cout<<"fake transform is "<<std::endl<<fakeTagTransform<<std::endl;
+        //add fake detection to deteion results from apriltag lib
+        //so they will be drawn
+        apriltag_detection_t *corrupted_det;
+        corrupted_det = static_cast<apriltag_detection_t*>(calloc(1, sizeof(apriltag_detection_t)));
+        corrupted_det->family = detection->family;
+        //std::cout<<"just defined det family "<<std::endl;
+        corrupted_det->id = detection->id;
+        corrupted_det->hamming = detection->hamming;
+        corrupted_det->decision_margin = detection->decision_margin;
+
+        //computing 3 by 3 homography matrix:
+        //https://github.com/AprilRobotics/apriltag/blob/master/common/homography.h
+
+        double half_tag_size  = rawTagDetArray.detections[i].size[0]/2.0;
+        //std::cout<<"get tag size :"<<half_tag_size<<std::endl;
+
+        matd_t *corrupted_H = matd_create(3,3);
+        MATD_EL(corrupted_H, 0, 0) = fx*fakeTagTransform(0,0)*half_tag_size + 
+                                        cx*fakeTagTransform(2,0)*half_tag_size;
+        MATD_EL(corrupted_H, 0, 1) = fx*fakeTagTransform(0,1)*half_tag_size + 
+                                        cx*fakeTagTransform(2,1)*half_tag_size;
+        MATD_EL(corrupted_H, 0, 2) = fx*fakeTagTransform(0,3) + cx*fakeTagTransform(2,3);
+        MATD_EL(corrupted_H, 1, 0) = fy*fakeTagTransform(1,0)*half_tag_size + 
+                                        cy*fakeTagTransform(2,0)*half_tag_size;
+        MATD_EL(corrupted_H, 1, 1) = fy*fakeTagTransform(1,1)*half_tag_size + 
+                                        cy*fakeTagTransform(2,1)*half_tag_size;
+        MATD_EL(corrupted_H, 1, 2) = fy*fakeTagTransform(1,3) + cy*fakeTagTransform(2,3);
+        MATD_EL(corrupted_H, 2, 0) = fakeTagTransform(2,0)*half_tag_size;
+        MATD_EL(corrupted_H, 2, 1) = fakeTagTransform(2,1)*half_tag_size;
+        MATD_EL(corrupted_H, 2, 2) = fakeTagTransform(2,3);
+
+
+        //std::cout<<"compute H of pose "<<pose_id<<std::endl;
+        corrupted_det->H = corrupted_H;
+        //convention about the order of poitns
+        //this H assumes y-axis pointing up; so the convention is from left-bottom corner going counter-clockwise 
+
+        //std::cout<<"compute c and p of pose "<<std::endl;
+        homography_project(corrupted_det->H, 0.0, 0.0, &(corrupted_det->c[0]), &(corrupted_det->c[1]));
+        homography_project(corrupted_det->H, -1.0, -1.0, &(corrupted_det->p[0][0]), &(corrupted_det->p[0][1]));
+        homography_project(corrupted_det->H,  1.0, -1.0, &(corrupted_det->p[1][0]), &(corrupted_det->p[1][1]));
+        homography_project(corrupted_det->H,  1.0,  1.0, &(corrupted_det->p[2][0]), &(corrupted_det->p[2][1]));
+        homography_project(corrupted_det->H, -1.0,  1.0, &(corrupted_det->p[3][0]), &(corrupted_det->p[3][1]));
+
+        //printDetPoints(corrupted_det);
+        
+        //std::cout<<"adding fake tag detection of pose "<<pose_id<<std::endl;
+        zarray_add(corrupted_detections_, &corrupted_det);
+      }
+    }      
+  }
+  return corruptedDetArray;
+}
+
+void CorruptedTagDetector::drawCorruptedDetections(cv_bridge::CvImagePtr image){
+  //std::cout<<"number of corrupted tags: "<<zarray_size(corrupted_detections_)<<std::endl;
+  for (int i = 0; i < zarray_size(corrupted_detections_); i++)
+  {
+    //cv::namedWindow( "Display window", cv::WINDOW_AUTOSIZE );// Create a window for display.
+    // cv::imshow( "Display window", image->image );                   // Show our image inside it.
+    // cv::waitKey(0);
+
+    //std::cout << "M = " << std::endl << " "  << image->image << std::endl << std::endl;
+    //std::cout<<"Printed image matrix!"<<std::endl;
+
+    apriltag_detection_t *det;
+    zarray_get(corrupted_detections_, i, &det);
+
+    // Check if this ID is present in config/tags.yaml
+    // Check if is part of a tag bundle
+    int tagID = det->id;
+    bool is_part_of_bundle = false;
+    for (unsigned int j=0; j<tag_bundle_descriptions_.size(); j++)
+    {
+      TagBundleDescription bundle = tag_bundle_descriptions_[j];
+      if (bundle.id2idx_.find(tagID) != bundle.id2idx_.end())
+      {
+        is_part_of_bundle = true;
+        break;
+      }
+    }
+    // If not part of a bundle, check if defined as a standalone tag
+    StandaloneTagDescription* standaloneDescription;
+    if (!is_part_of_bundle &&
+        !findStandaloneTagDescription(tagID, standaloneDescription, false))
+    {
+      // Neither a standalone tag nor part of a bundle, so this is a "rogue"
+      // tag, skip it.
+      continue;
+    }
+
+    //std::cout<<"start drawing lines!!!"<<std::endl;
+
+    // Draw tag outline with edge colors green, blue, blue, red
+    // (going counter-clockwise, starting from lower-left corner in
+    // tag coords). cv::Scalar(Blue, Green, Red) format for the edge
+    // colors!
+    //std::cout<<(int)det->p[0][0]<<", "<<(int)det->p[0][1]<<", "<<(int)det->p[1][0]<<", "<<(int)det->p[1][1]<<std::endl;
+    line(image->image, cv::Point((int)det->p[0][0], (int)det->p[0][1]),
+         cv::Point((int)det->p[1][0], (int)det->p[1][1]),
+         cv::Scalar(0, 0xff, 0)); // green
+    //std::cout<<"drew line 1"<<std::endl;
+    line(image->image, cv::Point((int)det->p[0][0], (int)det->p[0][1]),
+         cv::Point((int)det->p[3][0], (int)det->p[3][1]),
+         cv::Scalar(0, 0, 0xff)); // red
+    //std::cout<<"drew line 2"<<std::endl;
+    line(image->image, cv::Point((int)det->p[1][0], (int)det->p[1][1]),
+         cv::Point((int)det->p[2][0], (int)det->p[2][1]),
+         cv::Scalar(0xff, 0, 0)); // blue
+    //std::cout<<"drew line 3"<<std::endl;
+    line(image->image, cv::Point((int)det->p[2][0], (int)det->p[2][1]),
+         cv::Point((int)det->p[3][0], (int)det->p[3][1]),
+         cv::Scalar(0xff, 0, 0)); // blue
+    //std::cout<<"drew line 4"<<std::endl;
+
+    //std::cout<<"start drawing tag ID!!!"<<std::endl;
+    // Print tag ID in the middle of the tag
+    std::stringstream ss;
+    ss << det->id;
+    cv::String text = ss.str();
+    int fontface = cv::FONT_HERSHEY_SCRIPT_SIMPLEX;
+    double fontscale = 0.5;
+    int baseline;
+    cv::Size textsize = cv::getTextSize(text, fontface,
+                                        fontscale, 2, &baseline);
+    cv::putText(image->image, text,
+                cv::Point((int)(det->c[0]-textsize.width/2),
+                          (int)(det->c[1]+textsize.height/2)),
+                fontface, fontscale, cv::Scalar(0xff, 0x99, 0), 2);
+  }  
+}
+
+  // ROS_ASSERT(standalone_tags.getType() == XmlRpc::XmlRpcValue::TypeArray);
+  // // Loop through all tag descriptions
+  // for (int32_t i = 0; i < standalone_tags.size(); i++)
+  // {
+
+std::vector<std::pair<double, Eigen::Matrix4d>> CorruptedTagDetector::parseRandomPoses(
+      XmlRpc::XmlRpcValue& random_pose_descriptions){
+  // Create map that will be filled by the function and returned in the end
+  std::vector<std::pair<double, Eigen::Matrix4d>> prob_pose_vector;
+  // Ensure the type is correct
+  ROS_ASSERT(random_pose_descriptions.getType() == XmlRpc::XmlRpcValue::TypeArray);
+  // Loop through all pose descriptions
+  for (int32_t i = 0; i < random_pose_descriptions.size(); i++)
+  {
+
+    // i-th pose description
+    XmlRpc::XmlRpcValue& pose_description = random_pose_descriptions[i];
+
+    // Assert the pose description is a struct
+    ROS_ASSERT(pose_description.getType() ==
+               XmlRpc::XmlRpcValue::TypeStruct);
+    ROS_ASSERT(pose_description["prob"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+    ROS_ASSERT(pose_description["x"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+    ROS_ASSERT(pose_description["y"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+    ROS_ASSERT(pose_description["z"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+    ROS_ASSERT(pose_description["angle_x"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+    ROS_ASSERT(pose_description["angle_y"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+    ROS_ASSERT(pose_description["angle_z"].getType() ==
+               XmlRpc::XmlRpcValue::TypeDouble);
+
+    // random pose prob for sampling
+    double prob = (double)pose_description["prob"];
+    double x = (double)pose_description["x"];
+    double y = (double)pose_description["y"];
+    double z = (double)pose_description["z"];
+    double angle_x = (double)pose_description["angle_x"] * 3.14 / 180;
+    double angle_y = (double)pose_description["angle_y"] * 3.14 / 180;
+    double angle_z = (double)pose_description["angle_z"] * 3.14 / 180;
+
+    Eigen::AngleAxisd angleX(angle_x, Eigen::Vector3d::UnitX());
+    Eigen::AngleAxisd angleY(angle_y, Eigen::Vector3d::UnitY());
+    Eigen::AngleAxisd angleZ(angle_z, Eigen::Vector3d::UnitZ());
+
+    Eigen::Matrix3d rot3;
+    rot3 = angleX * angleY * angleZ;
+    Eigen::Matrix4d pose3 = Eigen::Matrix4d::Zero();
+    pose3.block(0,0,3,3) = rot3;
+    pose3(0, 3) = x;
+    pose3(1, 3) = y;
+    pose3(2, 3) = z;
+    pose3(3, 3) = 1.0;
+    ROS_INFO_STREAM("Loaded random pose "<<i<<":");
+    //std::cout<<"probability: "<< prob <<std::endl;
+    //std::cout<<"matrix:"<<std::endl;
+    //std::cout<<pose3<<std::endl;
+    prob_pose_vector.push_back(std::pair<double, Eigen::Matrix4d>(prob, pose3));
+  }
+  return prob_pose_vector;  
+}
+
 TagDetector::TagDetector(ros::NodeHandle pnh) :
     family_(getAprilTagOption<std::string>(pnh, "tag_family", "tag36h11")),
     threads_(getAprilTagOption<int>(pnh, "tag_threads", 4)),
@@ -714,7 +1060,7 @@ std::vector<TagBundleDescription > TagDetector::parseTagBundles (
       double qx = xmlRpcGetDoubleWithDefault(tag, "qx", 0.);
       double qy = xmlRpcGetDoubleWithDefault(tag, "qy", 0.);
       double qz = xmlRpcGetDoubleWithDefault(tag, "qz", 0.);
-      Eigen::Quaterniond q_tag(qw, qx, qy, qz);
+      Eigen::Quaternion<double> q_tag(qw, qx, qy, qz);
       q_tag.normalize();
       Eigen::Matrix3d R_oi = q_tag.toRotationMatrix();
 

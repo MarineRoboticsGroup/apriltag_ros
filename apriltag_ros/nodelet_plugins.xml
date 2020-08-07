@@ -5,5 +5,14 @@
 		<description>
           Continuous AprilTag 3 detector
 		</description>
+	</class>    
+</library>
+<library path="lib/libapriltag_ros_corrupted_continuous_detector">   
+	<class name="apriltag_ros/CorruptedContinuousDetector"
+        type="apriltag_ros::CorruptedContinuousDetector"
+		base_class_type="nodelet::Nodelet">
+		<description>
+          Corrupted Continuous AprilTag 3 detector
+		</description>
 	</class>
 </library>
