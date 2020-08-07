@@ -1,5 +1,11 @@
 # corrupted apriltag_ros
-this fork aims at adding extra synthetic tag detections around a true detection
+this fork aims at adding extra synthetic tag detections around a true detection.
+## expected results
+https://youtu.be/IwzWShnj-gQ
+## how to add your desired corrupted poses?
+1. edit ranom_pose_generator.yaml and add fake poses in the local frame of apriltag.
+2. edit your launch file and load ranom_pose_generator.yaml via rosparam.
+3. edit your lanuch file and replace apriltag_ros_continuous_node by apriltag_ros_corrupted_continuous_node.
 
 
 # apriltag_ros
