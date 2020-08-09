@@ -3,10 +3,10 @@ this fork aims at adding extra synthetic tag detections around a true detection.
 ## expected results
 https://youtu.be/IwzWShnj-gQ
 ## how to add your desired corrupted poses?
-1. edit ranom_pose_generator.yaml and add fake poses in the local frame of apriltag.
-2. edit your launch file and load ranom_pose_generator.yaml via rosparam.
+1. edit random_pose_generator.yaml and add fake poses in the local frame of apriltag.
+2. edit your launch file and load random_pose_generator.yaml via rosparam.
 3. edit your lanuch file and replace apriltag_ros_continuous_node by apriltag_ros_corrupted_continuous_node.
-4. roslaunch your launch file and check if you can see fake detections on tag detection image in rViz. Since the fake poses are accepted with a probability, the number of fake detections will change on the image.
+4. roslaunch your launch file and check if you can see fake detections on tag detection image in rViz. Since the fake poses are accepted with a probability, the number of fake detections will change.
 
 # apriltag_ros
 
